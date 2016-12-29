@@ -37,3 +37,9 @@ SUBDIRS += $$ifcomponent(mountainsort2,packages/mountainsort2/src/mountainsort2.
 SUBDIRS += $$ifcomponent(mountainsort3,packages/mountainsort3/src/mountainsort3.pro)
 SUBDIRS += $$ifcomponent(sslongview,packages/sslongview/src/sslongview.pro)
 
+
+
+deb.target = deb
+deb.commands = debuild $(DEBUILD_OPTS) -us -uc
+
+QMAKE_EXTRA_TARGETS += deb
