@@ -83,8 +83,10 @@ VPATH += ../../mountainview/src
 HEADERS += mvcontext.h
 SOURCES += mvcontext.cpp
 
+
 INCLUDEPATH += ../../mountainview/src/multiscaletimeseries
 VPATH += ../../mountainview/src/multiscaletimeseries
 HEADERS += multiscaletimeseries.h
 SOURCES += multiscaletimeseries.cpp
 
+include(../../installbin.pri)
