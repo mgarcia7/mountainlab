@@ -878,6 +878,10 @@ QJsonValue MLUtil::configValue(const QString& group, const QString& key)
 #endif
     if (json1.isEmpty())
         json1 = TextFile::read(MLUtil::mountainlabBasePath() + "/settings/mountainlab.default.json");
+    if (json1.isEmpty()) {
+        qFatal("Couldn't locate mountainlab.default.json or file is empty.");
+        abort();
+    }
     QJsonParseError err1;
     QJsonObject obj1 = QJsonDocument::fromJson(json1.toUtf8(), &err1).object();
     if (err1.error != QJsonParseError::NoError) {
