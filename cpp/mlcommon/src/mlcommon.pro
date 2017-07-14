@@ -26,7 +26,8 @@ HEADERS += mlcommon.h sumit.h \
     ../include/icounter.h \
     ../include/qprocessmanager.h \
     ../include/signalhandler.h \
-    ../include/mllog.h
+    ../include/mllog.h \
+    ../include/tracing/tracing.h
 
 SOURCES += \
     mlcommon.cpp sumit.cpp \
@@ -38,7 +39,8 @@ SOURCES += \
     icounter.cpp \
     qprocessmanager.cpp \
     signalhandler.cpp \
-    mllog.cpp
+    mllog.cpp \
+    tracing/tracing.cpp
 
 INCLUDEPATH += ../include/mda
 VPATH += ../include/mda
