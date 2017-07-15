@@ -2,12 +2,23 @@
 
 #include <QCoreApplication>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <thread>
+#include <QtDebug>
 
 namespace Trace {
 TracingSystem* TracingSystem::m_instance = nullptr;
+
+EventManager::EventManager() {
+    qDebug() << Q_FUNC_INFO;
+}
+
+EventManager::~EventManager() {
+    qDebug() << Q_FUNC_INFO;
+    flush();
+}
 
 void EventManager::flush() {
     if (m_events.isEmpty()) return;
@@ -20,6 +31,18 @@ void EventManager::flush() {
     //        // 2. spawn a thread and flush there
     //        // 3. have a global per-pid thread that handles flush
     //        qDeleteAll(eventsToFlush);
+}
+
+void CompleteEvent::serialize(QJsonObject &doc) const
+{
+    DurationEvent::serialize(doc);
+    doc.insert("dur", (qint64)m_dur.count());
+}
+
+void InstantEvent::serialize(QJsonObject &doc) const
+{
+    Event::serialize(doc);
+    doc.insert("s", QString((char)m_s));
 }
 
 }
@@ -199,6 +222,11 @@ void Event::setArgs(const QVariantMap &args)
     m_args = args;
 }
 
+void Event::setArg(const QString &name, const QVariant &value)
+{
+    m_args.insert(name, value);
+}
+
 QString Event::cname() const
 {
     return m_cname;
@@ -215,10 +243,11 @@ void Event::serialize(QJsonObject &json) const
     // cats
     if (cat().isEmpty())
         json.insert("cat", cat().join(','));
-    json.insert("ph", eventType());
+    json.insert("ph", QString(eventType()));
     json.insert("pid", (qint64)pid());
     json.insert("tid", (qint64)tid());
-    json.insert("ts", (qint64)ts());
+    if (ts() >=0)
+        json.insert("ts", (qint64)ts());
     if (!cname().isEmpty())
         json.insert("cname", cname());
     json.insert("args", QJsonObject::fromVariantMap(args()));
@@ -230,13 +259,102 @@ void CounterEvent::serialize(QJsonObject &json) const {
         json.insert("id", id());
 }
 
+void TracingSystem::trace_counter(const QString &name, QVector<QPair<QString, qreal> > series)
+{
+    TracingSystem* inst = TracingSystem::instance();
+    if (!inst) return;
+    high_resolution_clock::time_point t2 = high_resolution_clock::now();
+    microseconds time_span = duration_cast<microseconds>(t2.time_since_epoch());
+    qint64 ts = time_span.count();
+    auto ctr = new CounterEvent(name, ts);
+    for (auto serie: series)
+        ctr->setValue(serie.first, serie.second);
+    inst->eventManager()->append(ctr);
+}
+
+void TracingSystem::trace_begin(const QString &name, QVector<QPair<QString, QVariant>> args)
+{
+    TracingSystem* inst = TracingSystem::instance();
+    if (!inst) return;
+    high_resolution_clock::time_point t2 = high_resolution_clock::now();
+    microseconds time_span = duration_cast<microseconds>(t2.time_since_epoch());
+    qint64 ts = time_span.count();
+    auto dur = new DurationEventB(name, ts);
+    for (auto arg: args) {
+        dur->setArg(arg.first, arg.second);
+    }
+    inst->eventManager()->append(dur);
+}
+
+void TracingSystem::trace_end(QVector<QPair<QString, QVariant> > args)
+{
+    TracingSystem* inst = TracingSystem::instance();
+    if (!inst) return;
+    high_resolution_clock::time_point t2 = high_resolution_clock::now();
+    microseconds time_span = duration_cast<microseconds>(t2.time_since_epoch());
+    qint64 ts = time_span.count();
+    auto dur = new DurationEventE(ts);
+    for (auto arg: args) {
+        dur->setArg(arg.first, arg.second);
+    }
+    inst->eventManager()->append(dur);
+}
+
+void TracingSystem::trace_end(const QString &name, QVector<QPair<QString, QVariant> > args)
+{
+    TracingSystem* inst = TracingSystem::instance();
+    if (!inst) return;
+    high_resolution_clock::time_point t2 = high_resolution_clock::now();
+    microseconds time_span = duration_cast<microseconds>(t2.time_since_epoch());
+    qint64 ts = time_span.count();
+    auto dur = new DurationEventE(ts);
+    dur->setName(name);
+    for (auto arg: args) {
+        dur->setArg(arg.first, arg.second);
+    }
+    inst->eventManager()->append(dur);
+}
+
+void TracingSystem::trace_threadname(const QString &name)
+{
+    TracingSystem* inst = TracingSystem::instance();
+    if (!inst) return;
+
+    auto meta = new MetadataEvent("thread_name");
+    meta->setArg("name", name);
+    inst->eventManager()->append(meta);
+}
+
+void TracingSystem::trace_processname(const QString &name)
+{
+    TracingSystem* inst = TracingSystem::instance();
+    if (!inst) return;
+
+    auto meta = new MetadataEvent("process_name");
+    meta->setArg("name", name);
+    inst->eventManager()->append(meta);
+}
+
+void TracingSystem::trace_instant(const QString &name, char scope)
+{
+    TracingSystem* inst = TracingSystem::instance();
+    if (!inst) return;
+    high_resolution_clock::time_point t2 = high_resolution_clock::now();
+    microseconds time_span = duration_cast<microseconds>(t2.time_since_epoch());
+    qint64 ts = time_span.count();
+    auto instant = new InstantEvent(name, scope, ts);
+    inst->eventManager()->append(instant);
+}
+
 void TracingSystem::init()
 {
     QByteArray ba = qgetenv("TRACE_MASTER");
     if (ba.isEmpty()) {
+        qDebug() << "Init in master mode";
         qputenv("TRACE_MASTER", QByteArray::number(QCoreApplication::applicationPid()));
         initMaster();
     } else {
+        qDebug() << "Init in slave mode";
         initSlave();
     }
 }
@@ -257,12 +375,23 @@ void TracingSystem::initMaster()
             continue;
         }
     }
+    if (m_traceFilePath.isEmpty() && !QCoreApplication::applicationName().isEmpty()) {
+        m_traceFilePath = QCoreApplication::applicationName()+".trace";
+    }
+    if (m_traceFilePath.isEmpty()) {
+        m_traceFilePath = "application.trace";
+    }
+    m_traceFilePath = QFileInfo(m_traceFilePath).absoluteFilePath();
     qputenv("TRACE_FILE", m_traceFilePath.toLocal8Bit());
-    LockedFile file;
+    qWarning("Trace file: %s", qPrintable(m_traceFilePath));
+    LockedFile file(m_traceFilePath);
     file.lock(LockedFile::ExclusiveLock);
-    file.open(QIODevice::WriteOnly|QIODevice::Truncate|QIODevice::Text);
+    if (!file.open(QIODevice::WriteOnly|QIODevice::Truncate|QIODevice::Text)) {
+        qCritical("Device failed to open");
+    } else {
     file.write("[\n");
     file.close();
+    }
     file.unlock();
 }
 
@@ -274,9 +403,11 @@ void TracingSystem::initSlave()
 void TracingSystem::doFlush(const QVector<Event *> &events)
 {
     QMutexLocker locker(&m_mutex);
-    LockedFile file;
+    LockedFile file(m_traceFilePath);
     file.lock(LockedFile::ExclusiveLock);
-    file.open(QIODevice::Append|QIODevice::Text);
+    if (!file.open(QIODevice::Append|QIODevice::Text)) {
+        qCritical("Device failed to open in append mode");
+    }
     QTextStream stream(&file);
     foreach(Event* e, events) {
         QJsonObject obj;
@@ -292,14 +423,6 @@ void TracingSystem::flush(QVector<Event *> events)
     doFlush(events);
     qDeleteAll(events);
 }
-
-
-//void EventManager::doFlush(const QVector<Event *> &events) {
-//    foreach(Event* e, events) {
-//        QJsonObject obj;
-//        e->serialize(obj);
-//    }
-//}
 
 }
 

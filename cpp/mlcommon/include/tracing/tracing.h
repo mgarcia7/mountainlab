@@ -11,6 +11,7 @@
 #include <chrono>
 #include <sys/file.h>
 #include <thread>
+#include <QtDebug>
 
 using namespace std::chrono;
 
@@ -37,7 +38,7 @@ namespace Trace {
 class Event {
 public:
     typedef uint32_t Pid;
-    typedef uint64_t Tid;
+    typedef uint32_t Tid;
     typedef int64_t Timestamp;
     Event(Timestamp ts, Tid tid = 0, Pid pid = 0) : m_pid(pid), m_tid(tid), m_ts(ts) {
         if (m_pid == 0)
@@ -69,6 +70,7 @@ public:
 
     QVariantMap args() const;
     void setArgs(const QVariantMap &args);
+    void setArg(const QString& name, const QVariant& value);
 
     QString cname() const;
     void setCname(const QString &cname);
@@ -89,14 +91,14 @@ private:
 
 class DurationEvent : public Event {
 public:
-    DurationEvent(Tid tid, Timestamp ts, Pid pid = 0)
-        : Event(tid, ts, pid){}
+    DurationEvent(Timestamp ts, Tid tid = 0, Pid pid = 0)
+        : Event(ts, tid, pid){}
 };
 
 class DurationEventB : public DurationEvent {
 public:
-    DurationEventB(const QString& name, Tid tid, Timestamp ts,  Pid pid = 0)
-        : DurationEvent(tid, ts, pid){
+    DurationEventB(const QString& name, Timestamp ts,  Tid tid = 0, Pid pid = 0)
+        : DurationEvent(ts, tid, pid){
         setName(name);
     }
     virtual char eventType() const override { return 'B'; }
@@ -104,15 +106,56 @@ public:
 
 class DurationEventE : public DurationEvent {
 public:
-    DurationEventE(Tid tid, Timestamp ts, Pid pid = 0)
-        : DurationEvent(tid, ts, pid){}
+    DurationEventE(Timestamp ts, Tid tid = 0, Pid pid = 0)
+        : DurationEvent(ts, tid, pid){}
     virtual char eventType() const override { return 'E'; }
+};
+
+class CompleteEvent : public DurationEvent {
+public:
+    CompleteEvent(Timestamp ts, std::chrono::microseconds dur, Tid tid = 0, Pid pid = 0)
+        : DurationEvent(ts, tid, pid), m_dur(dur) {}
+    CompleteEvent(Timestamp ts, qint64 dur, Tid tid = 0, Pid pid = 0)
+        : DurationEvent(ts, tid, pid), m_dur(dur) {}
+    virtual char eventType() const override { return 'X'; }
+
+private:
+    std::chrono::microseconds m_dur;
+
+    // Event interface
+public:
+    virtual void serialize(QJsonObject &doc) const override;
+};
+
+class InstantEvent : public Event {
+public:
+    enum Scope { Thread = 't', Process = 'p', Global = 'g' };
+    InstantEvent(const QString& name, Timestamp ts, Tid tid = 0, Pid pid = 0)
+        : Event(ts, tid, pid) {
+        setName(name);
+        m_s = Thread;
+    }
+    InstantEvent(const QString& name, Scope s, Timestamp ts, Tid tid = 0, Pid pid = 0)
+        : Event(ts, tid, pid) {
+        setName(name);
+        m_s = s;
+    }
+    InstantEvent(const QString& name, char s, Timestamp ts, Tid tid = 0, Pid pid = 0)
+        : Event(ts, tid, pid) {
+        setName(name);
+        m_s = (Scope)s;
+    }
+
+    virtual char eventType() const override { return 'i'; }
+    virtual void serialize(QJsonObject &doc) const override;
+private:
+    Scope m_s;
 };
 
 class CounterEvent : public Event {
 public:
-    CounterEvent(const QString& name, Tid tid, Timestamp ts, Pid pid = 0)
-        : Event(tid, ts, pid){
+    CounterEvent(const QString& name, Timestamp ts, Tid tid = 0, Pid pid = 0)
+        : Event(ts, tid, pid){
         setName(name);
     }
     void setValue(const QString& series, QVariant value) {
@@ -134,12 +177,20 @@ private:
     bool m_idSet = false;
 };
 
+class MetadataEvent : public Event {
+public:
+    MetadataEvent(const QString& name, Tid tid = 0, Pid pid = 0)
+        : Event(-1, tid, pid) {
+        setName(name);
+    }
+
+    virtual char eventType() const override { return 'M'; }
+};
+
 class EventManager {
 public:
-    EventManager() {}
-    ~EventManager() {
-        flush();
-    }
+    EventManager();
+    ~EventManager();
     void append(Event* e) {
         m_events << e;
         if (m_events.size() > 100)
@@ -164,10 +215,46 @@ public:
         init();
     }
     ~TracingSystem() {
+        if (m_manager.hasLocalData()) {
+            //m_manager.localData()->flush();
+            m_manager.setLocalData(nullptr);
+        }
         if (m_instance == this) m_instance = nullptr;
     }
-    EventManager& eventManager() { return m_manager.localData(); }
+    EventManager* eventManager() {
+        if (!m_manager.hasLocalData())
+            m_manager.setLocalData(new EventManager);
+        return m_manager.localData();
+    }
     static TracingSystem* instance() { return m_instance; }
+    static void trace_counter(const QString& name, QVector<QPair<QString, qreal> > series);
+    static void trace_begin(const QString& name, QVector<QPair<QString, QVariant>> args = {});
+    static void trace_end(QVector<QPair<QString, QVariant>> args = {});
+    static void trace_end(const QString& name, QVector<QPair<QString, QVariant>> args = {});
+    static void trace_threadname(const QString& name);
+    static void trace_processname(const QString& name);
+    static void trace_instant(const QString& name, char scope = 't');
+
+    class Scope {
+    public:
+        Scope(){}
+        ~Scope() {
+            if (m_init) {
+                Trace::TracingSystem::trace_end(name);
+            }
+        }
+
+        void init(const QString& cat, const QString& nam) {
+            m_init = true;
+            category = cat;
+            name = nam;
+        }
+    private:
+        bool m_init = false;
+        QString name;
+        QString category;
+    };
+
 protected:
     void init();
     void initMaster();
@@ -178,7 +265,7 @@ protected:
 private:
     QString m_traceFilePath;
     static TracingSystem* m_instance;
-    QThreadStorage<EventManager> m_manager;
+    QThreadStorage<EventManager*> m_manager;
     QMutex m_mutex;
     friend class EventManager;
 };
@@ -192,6 +279,8 @@ public:
 
 class LockedFile : public QFile {
 public:
+    LockedFile() : QFile() {}
+    LockedFile(const QString& filePath) : QFile(filePath) {}
     enum LockType {
         SharedLock,
         ExclusiveLock
@@ -241,6 +330,51 @@ private:
     QStringList m_cats;
 };
 
+#define RANDOM_VARIABLE3(p, q) \
+    trace_tracing_system_##p##q
+#define RANDOM_VARIABLE2(p, q) \
+    RANDOM_VARIABLE3(p, q)
+#define RANDOM_VARIABLE(prefix) \
+    RANDOM_VARIABLE2(prefix, __LINE__)
+
+#define TRACE_EVENT_COUNTER1(category, name, value) \
+    INTERNAL_TRACE_EVENT_ADD(counter, category, name, {{"value", value}})
+
+#define TRACE_EVENT_COUNTER2(category, name, val1nam, val1val, val2nam, val2val) \
+    INTERNAL_TRACE_EVENT_ADD(counter, category, name, {{val1nam, val1val}, {val2nam, val2val}})
+
+#define TRACE_EVENT_INSTANT0(category, name) \
+    INTERNAL_TRACE_EVENT_ADD(instant, category, name, 't')
+
+//#define TRACE_EVENT_INSTANT1(category, name, arg1, val1) \
+//    INTERNAL_TRACE_EVENT_ADD(instant, category, name, {{arg1, val1}})
+//#define TRACE_EVENT_INSTANT2(category, name, arg1, val1, arg2, val2) \
+//    INTERNAL_TRACE_EVENT_ADD(instant, category, name, {{arg1, val1}, {arg2, val2}})
+
+#define TRACE_EVENT0(category, name) \
+    INTERNAL_TRACE_EVENT_ADD_SCOPE(category, name, {})
+
+#define TRACE_EVENT1(category, name, arg1, val1) \
+    INTERNAL_TRACE_EVENT_ADD_SCOPE(category, name, {{arg1, val1}})
+
+#define TRACE_EVENT2(category, name, arg1, val1, arg2, val2) \
+    INTERNAL_TRACE_EVENT_ADD_SCOPE(category, name, {{arg1, val1}, {arg2, val2}})
+
+#define INTERNAL_TRACE_EVENT_ADD(type, category, name, ...) \
+    do { \
+      if (true /* category */) { \
+        Trace::TracingSystem::trace_##type(name, ##__VA_ARGS__); \
+      } \
+    } while(0)
+
+#define INTERNAL_TRACE_EVENT_ADD_SCOPE(category, name, ...) \
+    Trace::TracingSystem::Scope RANDOM_VARIABLE(traceScope); \
+    if (true /*category*/)  { \
+        Trace::TracingSystem::trace_begin(name, ##__VA_ARGS__); \
+        RANDOM_VARIABLE(traceScope).init(category, name); \
+    }
+
+#if 0
 #define TRACE_COUNTER1(name, series, value) Tracing::instance()->writeCounter(name, series, value);
 
 #define TRACE_COUNTER(name, series, value) Tracing::instance()->writeCounter(name, series, value);
@@ -255,4 +389,5 @@ private:
 #define TRACE_SCOPE1(name, key, val, cat) TracingScope scope_ ## name (#name, { { key, val } }, cat);
 #define TRACE_SCOPE2(name, key1, val1, key2, val2, cat) TracingScope scope_ ## name (#name, { { key1, val1 }, {key2, val2} }, cat);
 #define TRACE_SCOPE3(name, key1, val1, key2, val2, key3, val3, cat) TracingScope scope_ ## name (#name, { { key1, val1 }, {key2, val2}, {key3, val3} }, cat);
+#endif
 #endif // TRACING_H
