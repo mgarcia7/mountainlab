@@ -12,6 +12,7 @@
 #include <sys/file.h>
 #include <thread>
 #include <QtDebug>
+#include <QReadWriteLock>
 
 using namespace std::chrono;
 
@@ -53,8 +54,8 @@ public:
     QString name() const;
     void setName(const QString &name);
 
-    QStringList cat() const;
-    void setCat(const QStringList &cat);
+    QString cat() const;
+    void setCat(const QString &cat);
 
     Timestamp ts() const;
     void setTs(const Timestamp &ts);
@@ -80,7 +81,7 @@ protected:
     QVariantMap& argsRef() { return m_args; }
 private:
     QString m_name;
-    QStringList m_cat;
+    QString m_cat;
     Pid m_pid;
     Tid m_tid;
     Timestamp m_ts;
@@ -197,8 +198,6 @@ public:
             flush();
     }
     void flush();
-protected:
-//    void doFlush(const QVector<Event*>& events);
 
 private:
     QVector<Event*> m_events;
@@ -206,6 +205,7 @@ private:
 
 class TracingSystem {
 public:
+    using ArgsVector = QVector<QPair<QString, QVariant>>;
     TracingSystem() {
         if (m_instance) {
             qWarning("TracingSystem instance already present");
@@ -216,7 +216,6 @@ public:
     }
     ~TracingSystem() {
         if (m_manager.hasLocalData()) {
-            //m_manager.localData()->flush();
             m_manager.setLocalData(nullptr);
         }
         if (m_instance == this) m_instance = nullptr;
@@ -226,21 +225,27 @@ public:
             m_manager.setLocalData(new EventManager);
         return m_manager.localData();
     }
+
+    bool isEnabled(const QString& category) const;
+    void setEnabled(const QStringList& patterns);
+    void setEnabled(const QString& pattern);
     static TracingSystem* instance() { return m_instance; }
-    static void trace_counter(const QString& name, QVector<QPair<QString, qreal> > series);
-    static void trace_begin(const QString& name, QVector<QPair<QString, QVariant>> args = {});
-    static void trace_end(QVector<QPair<QString, QVariant>> args = {});
-    static void trace_end(const QString& name, QVector<QPair<QString, QVariant>> args = {});
+    static bool trace_categoryEnabled(const QString& category);
+    static void trace_counter(const QString& category, const QString& name, QVector<QPair<QString, qreal> > series);
+    static void trace_begin(const QString& category, const QString& name, const ArgsVector& args = {});
+    static void trace_end(const ArgsVector& args = {});
+    static void trace_end(const QString& category, const QString& name, const ArgsVector& args = {});
     static void trace_threadname(const QString& name);
     static void trace_processname(const QString& name);
-    static void trace_instant(const QString& name, char scope = 't');
+    static void trace_instant(const QString& category, const QString& name, char scope = 't');
+    static void trace_instant(const QString& category, const QString& name, char scope, const ArgsVector& args);
 
     class Scope {
     public:
         Scope(){}
         ~Scope() {
             if (m_init) {
-                Trace::TracingSystem::trace_end(name);
+                Trace::TracingSystem::trace_end(category, name);
             }
         }
 
@@ -255,25 +260,29 @@ public:
         QString category;
     };
 
+    bool isEnabled() const;
+
 protected:
     void init();
     void initMaster();
     void initSlave();
     void doFlush(const QVector<Event*>& events);
     void flush(QVector<Event*> events);
+    bool checkCategoryPattern(const QString& categoryName) const;
 
 private:
+    bool m_enabled = false;
     QString m_traceFilePath;
     static TracingSystem* m_instance;
     QThreadStorage<EventManager*> m_manager;
     QMutex m_mutex;
+    QVector<QRegExp> m_patterns;
+    mutable QSet<QString> m_enabledCategories;
+    mutable QSet<QString> m_disabledCategories;
+    mutable QReadWriteLock m_categoryLock;
     friend class EventManager;
 };
 
-class TraceApi {
-public:
-
-};
 
 } // namespace Trace
 
@@ -294,48 +303,26 @@ public:
     }
 };
 
-class Tracing
-{
-public:
-    Tracing(const QString& filePath = "mountainlab.trace");
-    ~Tracing();
-    static Tracing* instance();
-    void writeCounter(const QString& name, const QString& series, double value, const QStringList& categories = QStringList());
-    void writeBegin(const QString& name, const QVariantMap& args = QVariantMap(), const QStringList& categories = QStringList());
-    void writeEnd(const QString& name, const QVariantMap& args = QVariantMap(), const QStringList& categories = QStringList());
-private:
-    void open();
-    void write(const QJsonObject& entry);
-    static Tracing* m_instance;
-    QString m_path;
-    QMutex m_mutex;
-    LockedFile m_file;
-    QTextStream m_stream;
-    high_resolution_clock::time_point m_baseTime;
-};
-
-class TracingScope {
-public:
-    TracingScope(const QString& name, const QVariantMap& args, const QString& categories = QString())
-        : m_name(name), m_args(args), m_cats(categories.split(',')) {
-        Tracing::instance()->writeBegin(m_name, m_args, m_cats);
-    }
-    ~TracingScope() {
-        Tracing::instance()->writeEnd(m_name, m_args, m_cats);
-    }
-
-private:
-    QString m_name;
-    QVariantMap m_args;
-    QStringList m_cats;
-};
-
 #define RANDOM_VARIABLE3(p, q) \
     trace_tracing_system_##p##q
 #define RANDOM_VARIABLE2(p, q) \
     RANDOM_VARIABLE3(p, q)
 #define RANDOM_VARIABLE(prefix) \
     RANDOM_VARIABLE2(prefix, __LINE__)
+
+#define TRACE_EVENT_BEGIN0(category, name) \
+    INTERNAL_TRACE_EVENT_ADD(begin, category, name, {})
+#define TRACE_EVENT_BEGIN1(category, name, arg1, val1) \
+    INTERNAL_TRACE_EVENT_ADD(begin, category, name, {{arg1, val1}})
+#define TRACE_EVENT_BEGIN2(category, name, arg1, val1, arg2, val2) \
+    INTERNAL_TRACE_EVENT_ADD(begin, category, name, {{arg1, val1}, {arg2, val2}})
+
+#define TRACE_EVENT_END0(category, name) \
+    INTERNAL_TRACE_EVENT_ADD(end, category, name, {})
+#define TRACE_EVENT_END1(category, name, arg1, val1) \
+    INTERNAL_TRACE_EVENT_ADD(end, category, name, {{arg1, val1}})
+#define TRACE_EVENT_END2(category, name, arg1, val1, arg2, val2) \
+    INTERNAL_TRACE_EVENT_ADD(end, category, name, {{arg1, val1}, {arg2, val2}})
 
 #define TRACE_EVENT_COUNTER1(category, name, value) \
     INTERNAL_TRACE_EVENT_ADD(counter, category, name, {{"value", value}})
@@ -346,10 +333,10 @@ private:
 #define TRACE_EVENT_INSTANT0(category, name) \
     INTERNAL_TRACE_EVENT_ADD(instant, category, name, 't')
 
-//#define TRACE_EVENT_INSTANT1(category, name, arg1, val1) \
-//    INTERNAL_TRACE_EVENT_ADD(instant, category, name, {{arg1, val1}})
-//#define TRACE_EVENT_INSTANT2(category, name, arg1, val1, arg2, val2) \
-//    INTERNAL_TRACE_EVENT_ADD(instant, category, name, {{arg1, val1}, {arg2, val2}})
+#define TRACE_EVENT_INSTANT1(category, name, arg1, val1) \
+    INTERNAL_TRACE_EVENT_ADD(instant, category, name, 't', {{arg1, val1}})
+#define TRACE_EVENT_INSTANT2(category, name, arg1, val1, arg2, val2) \
+    INTERNAL_TRACE_EVENT_ADD(instant, category, name, 't', {{arg1, val1}, {arg2, val2}})
 
 #define TRACE_EVENT0(category, name) \
     INTERNAL_TRACE_EVENT_ADD_SCOPE(category, name, {})
@@ -362,15 +349,15 @@ private:
 
 #define INTERNAL_TRACE_EVENT_ADD(type, category, name, ...) \
     do { \
-      if (true /* category */) { \
-        Trace::TracingSystem::trace_##type(name, ##__VA_ARGS__); \
+      if (Trace::TracingSystem::trace_categoryEnabled(category)) { \
+        Trace::TracingSystem::trace_##type(category, name, ##__VA_ARGS__); \
       } \
     } while(0)
 
 #define INTERNAL_TRACE_EVENT_ADD_SCOPE(category, name, ...) \
     Trace::TracingSystem::Scope RANDOM_VARIABLE(traceScope); \
-    if (true /*category*/)  { \
-        Trace::TracingSystem::trace_begin(name, ##__VA_ARGS__); \
+    if (Trace::TracingSystem::trace_categoryEnabled(category)) { \
+        Trace::TracingSystem::trace_begin(category, name, ##__VA_ARGS__); \
         RANDOM_VARIABLE(traceScope).init(category, name); \
     }
 
