@@ -337,8 +337,17 @@ void TracingSystem::initMaster()
             continue;
         }
     }
+    if (!isEnabled()) {
+        if (qgetenv("TRACE_ENABLED").toInt() > 0) {
+            m_enabled = true;
+            if (categoriesStr.isEmpty())
+                categoriesStr = qgetenv("TRACE_CATEGORIES");
+        }
+    }
     if (!isEnabled())
         return;
+    if (m_traceFilePath.isEmpty() && !qgetenv("TRACE_FILE").isEmpty())
+        m_traceFilePath = qgetenv("TRACE_FILE");
     if (m_traceFilePath.isEmpty() && !QCoreApplication::applicationName().isEmpty()) {
         m_traceFilePath = QCoreApplication::applicationName()+".trace";
     }
@@ -346,6 +355,7 @@ void TracingSystem::initMaster()
         m_traceFilePath = "application.trace";
     }
     m_traceFilePath = QFileInfo(m_traceFilePath).absoluteFilePath();
+
     // tell slaves about tracing
     qputenv("TRACE_MASTER", QByteArray::number(QCoreApplication::applicationPid()));
     qputenv("TRACE_FILE", m_traceFilePath.toLocal8Bit());
